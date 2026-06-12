@@ -1,0 +1,188 @@
+# Azure DevOps CI/CD Pipeline
+# Task 1: CI/CD Pipeline using Azure
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - 'Task1-CICD-Azure/app/**'
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  # Azure Container Registry
+  ACR_NAME: 'codealphacr'
+  IMAGE_NAME: 'webapp'
+  IMAGE_TAG: '$(Build.BuildId)'
+  # Azure App Service
+  APP_SERVICE_NAME: 'codealpha-webapp'
+  RESOURCE_GROUP: 'codealpha-rg'
+  # Docker
+  DOCKERFILE_PATH: 'Task1-CICD-Azure/app/Dockerfile'
+  DOCKER_CONTEXT: 'Task1-CICD-Azure/app'
+
+stages:
+  # ─────────────────────────────────────────
+  # STAGE 1: Build & Test
+  # ─────────────────────────────────────────
+  - stage: BuildAndTest
+    displayName: 'Build and Test'
+    jobs:
+      - job: Build
+        displayName: 'Build Application'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.11'
+            displayName: 'Set up Python 3.11'
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r Task1-CICD-Azure/app/requirements.txt
+            displayName: 'Install dependencies'
+
+          - script: |
+              pip install pytest pytest-cov
+              cd Task1-CICD-Azure
+              pytest app/tests/ -v --junitxml=$(Build.ArtifactStagingDirectory)/test-results.xml \
+                     --cov=app --cov-report=xml:$(Build.ArtifactStagingDirectory)/coverage.xml
+            displayName: 'Run unit tests with coverage'
+
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '$(Build.ArtifactStagingDirectory)/test-results.xml'
+              testRunTitle: 'Python Unit Tests'
+
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: '$(Build.ArtifactStagingDirectory)/coverage.xml'
+
+  # ─────────────────────────────────────────
+  # STAGE 2: Docker Build & Push to ACR
+  # ─────────────────────────────────────────
+  - stage: DockerBuildPush
+    displayName: 'Docker Build & Push to ACR'
+    dependsOn: BuildAndTest
+    condition: succeeded()
+    jobs:
+      - job: DockerBuildPush
+        displayName: 'Build & Push Docker Image'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            displayName: 'Login to Azure Container Registry'
+            inputs:
+              command: 'login'
+              containerRegistry: 'AzureContainerRegistryServiceConnection'
+
+          - task: Docker@2
+            displayName: 'Build Docker image'
+            inputs:
+              command: 'build'
+              repository: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME)'
+              dockerfile: '$(DOCKERFILE_PATH)'
+              buildContext: '$(DOCKER_CONTEXT)'
+              tags: |
+                $(IMAGE_TAG)
+                latest
+
+          - script: |
+              echo "Running container security scan..."
+              docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                aquasec/trivy image --exit-code 0 --severity HIGH,CRITICAL \
+                $(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG)
+            displayName: 'Security scan with Trivy'
+            continueOnError: true
+
+          - task: Docker@2
+            displayName: 'Push Docker image to ACR'
+            inputs:
+              command: 'push'
+              repository: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME)'
+              tags: |
+                $(IMAGE_TAG)
+                latest
+
+  # ─────────────────────────────────────────
+  # STAGE 3: Deploy to Azure App Service
+  # ─────────────────────────────────────────
+  - stage: DeployStaging
+    displayName: 'Deploy to Staging'
+    dependsOn: DockerBuildPush
+    condition: succeeded()
+    jobs:
+      - deployment: DeployToStaging
+        displayName: 'Deploy to Staging Slot'
+        environment: 'staging'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: 'Deploy container to App Service (staging slot)'
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    appName: '$(APP_SERVICE_NAME)'
+                    slotName: 'staging'
+                    containers: '$(ACR_NAME).azurecr.io/$(IMAGE_NAME):$(IMAGE_TAG)'
+
+                - script: |
+                    echo "Running smoke tests on staging slot..."
+                    STAGING_URL="https://$(APP_SERVICE_NAME)-staging.azurewebsites.net"
+                    for i in {1..5}; do
+                      STATUS=$(curl -s -o /dev/null -w "%{http_code}" $STAGING_URL/health)
+                      if [ "$STATUS" = "200" ]; then
+                        echo "Smoke test passed! HTTP $STATUS"
+                        exit 0
+                      fi
+                      echo "Attempt $i failed with status $STATUS, retrying in 10s..."
+                      sleep 10
+                    done
+                    echo "Smoke tests failed after 5 attempts"
+                    exit 1
+                  displayName: 'Smoke tests on staging'
+
+  - stage: DeployProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployStaging
+    condition: succeeded()
+    jobs:
+      - deployment: DeployToProduction
+        displayName: 'Swap slots to Production'
+        environment: 'production'
+        pool:
+          vmImage: 'ubuntu-latest'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureAppServiceManage@0
+                  displayName: 'Swap staging → production'
+                  inputs:
+                    azureSubscription: 'AzureServiceConnection'
+                    Action: 'Swap Slots'
+                    WebAppName: '$(APP_SERVICE_NAME)'
+                    ResourceGroupName: '$(RESOURCE_GROUP)'
+                    SourceSlot: 'staging'
+
+                - script: |
+                    echo "Verifying production deployment..."
+                    PROD_URL="https://$(APP_SERVICE_NAME).azurewebsites.net"
+                    STATUS=$(curl -s -o /dev/null -w "%{http_code}" $PROD_URL/health)
+                    echo "Production health check: HTTP $STATUS"
+                    [ "$STATUS" = "200" ] && echo "Production is healthy!" || echo "Warning: unexpected status"
+                  displayName: 'Production health check'
