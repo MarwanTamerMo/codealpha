@@ -1,0 +1,173 @@
+// Jenkinsfile for Task 2: Jenkins Remoting Project
+// Demonstrates distributing builds across remote Jenkins agents
+
+pipeline {
+    // Do NOT run on master/controller - always delegate to agents
+    agent none
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+    }
+
+    environment {
+        APP_NAME        = 'codealpha-jenkins-remote'
+        AGENT_LINUX     = 'linux-agent'
+        AGENT_DOCKER    = 'docker-agent'
+    }
+
+    stages {
+        // ────────────────────────────────────────────────────
+        // Stage 1: Verify agent connectivity (node isolation)
+        // ────────────────────────────────────────────────────
+        stage('Agent Connectivity Check') {
+            parallel {
+                stage('Linux Agent') {
+                    agent { label "${AGENT_LINUX}" }
+                    steps {
+                        sh '''
+                            echo "=== Linux Agent Info ==="
+                            echo "Hostname : $(hostname)"
+                            echo "OS       : $(uname -a)"
+                            echo "User     : $(whoami)"
+                            echo "Java     : $(java -version 2>&1)"
+                            echo "Workspace: ${WORKSPACE}"
+                        '''
+                    }
+                }
+                stage('Docker Agent') {
+                    agent {
+                        docker {
+                            image 'python:3.11-slim'
+                            label "${AGENT_DOCKER}"
+                            args '-u root'
+                        }
+                    }
+                    steps {
+                        sh '''
+                            echo "=== Docker Agent Info ==="
+                            echo "Python: $(python --version)"
+                            echo "Hostname: $(hostname)"
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ────────────────────────────────────────────────────
+        // Stage 2: Build distributed across Linux agents
+        // ────────────────────────────────────────────────────
+        stage('Distributed Build') {
+            agent { label "${AGENT_LINUX}" }
+            steps {
+                checkout scm
+                sh '''
+                    echo "Building on remote Linux agent: $(hostname)"
+                    cd Task2-Jenkins-Remoting/app
+                    pip install --quiet -r requirements.txt
+                '''
+                stash includes: 'Task2-Jenkins-Remoting/**', name: 'source'
+            }
+        }
+
+        // ────────────────────────────────────────────────────
+        // Stage 3: Run tests on Docker agent (isolated)
+        // ────────────────────────────────────────────────────
+        stage('Remote Tests (Docker Agent)') {
+            agent {
+                docker {
+                    image 'python:3.11-slim'
+                    label "${AGENT_DOCKER}"
+                    args '-u root'
+                }
+            }
+            steps {
+                unstash 'source'
+                sh '''
+                    cd Task2-Jenkins-Remoting/app
+                    pip install --quiet -r requirements.txt pytest pytest-cov
+                    pytest tests/ -v \
+                        --junitxml=test-results.xml \
+                        --cov=. --cov-report=term-missing
+                '''
+                junit 'Task2-Jenkins-Remoting/app/test-results.xml'
+            }
+        }
+
+        // ────────────────────────────────────────────────────
+        // Stage 4: Parallel architecture matrix test
+        // ────────────────────────────────────────────────────
+        stage('Multi-Architecture Matrix') {
+            parallel {
+                stage('Python 3.10') {
+                    agent {
+                        docker {
+                            image 'python:3.10-slim'
+                            label "${AGENT_DOCKER}"
+                            args '-u root'
+                        }
+                    }
+                    steps {
+                        unstash 'source'
+                        sh '''
+                            echo "Testing on Python $(python --version)"
+                            cd Task2-Jenkins-Remoting/app
+                            pip install --quiet -r requirements.txt pytest
+                            pytest tests/ -q
+                        '''
+                    }
+                }
+                stage('Python 3.11') {
+                    agent {
+                        docker {
+                            image 'python:3.11-slim'
+                            label "${AGENT_DOCKER}"
+                            args '-u root'
+                        }
+                    }
+                    steps {
+                        unstash 'source'
+                        sh '''
+                            echo "Testing on Python $(python --version)"
+                            cd Task2-Jenkins-Remoting/app
+                            pip install --quiet -r requirements.txt pytest
+                            pytest tests/ -q
+                        '''
+                    }
+                }
+                stage('Python 3.12') {
+                    agent {
+                        docker {
+                            image 'python:3.12-slim'
+                            label "${AGENT_DOCKER}"
+                            args '-u root'
+                        }
+                    }
+                    steps {
+                        unstash 'source'
+                        sh '''
+                            echo "Testing on Python $(python --version)"
+                            cd Task2-Jenkins-Remoting/app
+                            pip install --quiet -r requirements.txt pytest
+                            pytest tests/ -q
+                        '''
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo "Pipeline completed. Build #${BUILD_NUMBER} on branch ${GIT_BRANCH}"
+        }
+        success {
+            echo "✅ All stages passed successfully across remote agents!"
+        }
+        failure {
+            echo "❌ Pipeline failed. Check logs above for details."
+        }
+    }
+}

@@ -1,0 +1,85 @@
+# Docker Compose for Jenkins Controller + Remote Agents
+# Task 2: Jenkins Remoting Project
+
+version: '3.8'
+
+networks:
+  jenkins-net:
+    driver: bridge
+
+volumes:
+  jenkins-data:
+  agent-workspace:
+
+services:
+  # ────────────────────────────────────────────────────
+  # Jenkins Controller (Master)
+  # ────────────────────────────────────────────────────
+  jenkins-controller:
+    image: jenkins/jenkins:lts-jdk17
+    container_name: jenkins-controller
+    privileged: true
+    restart: unless-stopped
+    ports:
+      - "8080:8080"    # Web UI
+      - "50000:50000"  # JNLP agent port
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - JENKINS_OPTS=--httpPort=8080
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+    networks:
+      - jenkins-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/login"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ────────────────────────────────────────────────────
+  # Remote Linux Agent (JNLP/Remoting protocol)
+  # ────────────────────────────────────────────────────
+  linux-agent:
+    build:
+      context: ./docker/linux-agent
+      dockerfile: Dockerfile
+    container_name: jenkins-linux-agent
+    restart: unless-stopped
+    depends_on:
+      jenkins-controller:
+        condition: service_healthy
+    environment:
+      - JENKINS_URL=http://jenkins-controller:8080
+      - JENKINS_AGENT_NAME=linux-agent
+      - JENKINS_SECRET=${LINUX_AGENT_SECRET}
+      - JENKINS_AGENT_WORKDIR=/home/jenkins/agent
+    volumes:
+      - agent-workspace:/home/jenkins/agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - jenkins-net
+
+  # ────────────────────────────────────────────────────
+  # Docker-in-Docker Agent for container builds
+  # ────────────────────────────────────────────────────
+  docker-agent:
+    build:
+      context: ./docker/docker-agent
+      dockerfile: Dockerfile
+    container_name: jenkins-docker-agent
+    restart: unless-stopped
+    privileged: true
+    depends_on:
+      jenkins-controller:
+        condition: service_healthy
+    environment:
+      - JENKINS_URL=http://jenkins-controller:8080
+      - JENKINS_AGENT_NAME=docker-agent
+      - JENKINS_SECRET=${DOCKER_AGENT_SECRET}
+      - JENKINS_AGENT_WORKDIR=/home/jenkins/agent
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - jenkins-net
