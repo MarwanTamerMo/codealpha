@@ -1,0 +1,98 @@
+// Task 3: Java Application using Gradle
+// CodeAlpha DevOps Internship
+
+plugins {
+    id 'java'
+    id 'application'
+    id 'jacoco'        // Code coverage
+    id 'checkstyle'   // Code style
+}
+
+group   = 'tech.codealpha'
+version = '1.0.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+application {
+    mainClass = 'tech.codealpha.App'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // JUnit 5 for testing
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params'
+
+    // Logging
+    implementation 'org.slf4j:slf4j-api:2.0.13'
+    implementation 'ch.qos.logback:logback-classic:1.5.6'
+}
+
+// ── Test configuration ──────────────────────────────────────────────────────────
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        showStandardStreams = true
+    }
+    finalizedBy jacocoTestReport
+}
+
+// ── JaCoCo coverage report ─────────────────────────────────────────────────────
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required  = true
+        html.required = true
+    }
+}
+
+jacocoTestCoverageVerification {
+    violationRules {
+        rule {
+            limit {
+                minimum = 0.70  // 70% minimum coverage
+            }
+        }
+    }
+}
+
+// ── Fat JAR (standalone) ───────────────────────────────────────────────────────
+tasks.register('fatJar', Jar) {
+    group       = 'build'
+    description = 'Builds a standalone fat JAR with all dependencies'
+    archiveClassifier.set('all')
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes 'Main-Class': application.mainClass
+    }
+    from {
+        configurations.runtimeClasspath.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+    with jar
+    dependsOn configurations.runtimeClasspath
+}
+
+// Build always produces fat JAR
+build.dependsOn fatJar
+
+// ── Custom task: show dependency tree ───────────────────────────────────────────
+tasks.register('showDeps') {
+    group       = 'help'
+    description = 'Print all resolved runtime dependencies'
+    doLast {
+        println "\n=== Runtime Dependencies ==="
+        configurations.runtimeClasspath.resolvedConfiguration.resolvedArtifacts.each {
+            println "  ${it.moduleVersion.id.group}:${it.name}:${it.moduleVersion.id.version}"
+        }
+    }
+}

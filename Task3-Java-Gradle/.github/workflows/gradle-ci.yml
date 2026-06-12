@@ -1,0 +1,76 @@
+# GitHub Actions CI for Task 3: Java Application using Gradle
+
+name: Java Gradle CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Task3-Java-Gradle/**'
+  pull_request:
+    paths:
+      - 'Task3-Java-Gradle/**'
+
+jobs:
+  build-and-test:
+    name: Build & Test (Java ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        java: [ '17', '21' ]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ matrix.java }}
+          distribution: 'temurin'
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('Task3-Java-Gradle/**/*.gradle*') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x Task3-Java-Gradle/gradlew
+        working-directory: .
+
+      - name: Build with Gradle
+        working-directory: Task3-Java-Gradle
+        run: ./gradlew build --no-daemon
+
+      - name: Run tests with coverage
+        working-directory: Task3-Java-Gradle
+        run: ./gradlew test jacocoTestReport --no-daemon
+
+      - name: Verify coverage threshold (70%)
+        working-directory: Task3-Java-Gradle
+        run: ./gradlew jacocoTestCoverageVerification --no-daemon
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: JUnit Tests (Java ${{ matrix.java }})
+          path: Task3-Java-Gradle/build/test-results/test/*.xml
+          reporter: java-junit
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-report-java-${{ matrix.java }}
+          path: Task3-Java-Gradle/build/reports/jacoco/
+
+      - name: Upload fat JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: codealpha-app-java-${{ matrix.java }}
+          path: Task3-Java-Gradle/build/libs/*-all.jar
